@@ -1,0 +1,14 @@
+{
+  "name": "secure-messaging-platform",
+  "version": "1.0.0",
+  "description": "Zero-Knowledge Ephemeral CLI Vault",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "server": "npm --prefix server run dev",
+    "client": "npm --prefix client start --"
+  }
+}
