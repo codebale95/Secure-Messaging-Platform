@@ -138,6 +138,52 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Handle join group
+  socket.on('join-group', (groupName) => {
+    if (!registeredUsername) {
+      socket.emit('sys-alert', { type: 'error', message: 'You must register a username first.' });
+      return;
+    }
+    if (!groupName) return;
+
+    socket.join(groupName);
+    socket.emit('sys-alert', { type: 'success', message: `Joined group #${groupName}` });
+    socket.to(groupName).emit('sys-event', { type: 'info', message: `${registeredUsername} joined #${groupName}` });
+  });
+
+  // Handle leave group
+  socket.on('leave-group', (groupName) => {
+    if (!registeredUsername) return;
+    if (!groupName) return;
+
+    socket.leave(groupName);
+    socket.emit('sys-alert', { type: 'info', message: `Left group #${groupName}` });
+    socket.to(groupName).emit('sys-event', { type: 'info', message: `${registeredUsername} left #${groupName}` });
+  });
+
+  // Handle group messaging
+  socket.on('group-message', ({ group, content }) => {
+    if (!registeredUsername) {
+      socket.emit('sys-alert', { type: 'error', message: 'You must register a username first.' });
+      return;
+    }
+
+    if (!group || !content) return;
+
+    const messagePayload = {
+      sender: registeredUsername,
+      group: group,
+      content: content,
+      timestamp: new Date().toISOString()
+    };
+
+    // Send back to sender for visual rendering confirmation
+    socket.emit('group-message-sent', { group, content, timestamp: messagePayload.timestamp });
+
+    // Broadcast to the room, except sender
+    socket.to(group).emit('group-message-received', messagePayload);
+  });
+
   // Handle disconnect
   socket.on('disconnect', () => {
     if (registeredUsername) {

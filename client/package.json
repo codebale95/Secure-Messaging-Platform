@@ -8,11 +8,8 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "ink": "^4.4.1",
-    "ink-text-input": "^5.0.1",
+    "neo-blessed": "^0.2.0",
     "socket.io-client": "^4.7.5",
-    "chalk": "^4.1.2",
     "minimist": "^1.2.8"
   }
 }

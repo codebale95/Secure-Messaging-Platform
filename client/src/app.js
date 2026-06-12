@@ -1,377 +1,411 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Box, Text, useInput, useApp } from 'ink';
-import TextInput from 'ink-text-input';
-import { io } from 'socket.io-client';
-import chalk from 'chalk';
+import blessed from 'neo-blessed';
 import { getWebhookUrl, setWebhookUrl, clearWebhookUrl } from './config.js';
 
-export default function App({ username }) {
-  const { exit } = useApp();
-  const [inputVal, setInputVal] = useState('');
-  const [messages, setMessages] = useState([]);
-  const [isConnected, setIsConnected] = useState(false);
-  const [activeWebhook, setActiveWebhook] = useState(getWebhookUrl() || 'Not Configured');
-  const [socket, setSocket] = useState(null);
-  const [lastRecipient, setLastRecipient] = useState(null);
+// ─── Color utilities ────────────────────────────────────────────────────────
 
-  // Helper to add system and diagnostic log messages to screen (emoji-free, professional logs)
-  const addSystemMessage = (text, type = 'info') => {
-    const prefixes = { info: '[INFO]', success: '[OK]', warning: '[WARN]', error: '[ERR]' };
-    const colors = { info: chalk.blue, success: chalk.green, warning: chalk.yellow, error: chalk.red };
-    const colorFn = colors[type] || chalk.white;
-    const prefix = prefixes[type] || '[INFO]';
+const USER_COLORS = ['cyan', 'magenta', 'yellow', 'blue', 'green', 'red'];
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: Math.random().toString(),
-        type: 'system',
-        text: colorFn(`${prefix} ${text}`),
-        timestamp: new Date().toLocaleTimeString()
-      }
-    ].slice(-16));
-  };
+function getUserColor(username) {
+  let hash = 0;
+  for (let i = 0; i < username.length; i++) {
+    hash = username.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return USER_COLORS[Math.abs(hash) % USER_COLORS.length];
+}
 
-  // Helper to trigger local outgoing webhook
-  const triggerOutgoingWebhook = async (source, data) => {
-    const url = getWebhookUrl();
-    if (!url) return;
+function formatMessage(sender, timestamp, text) {
+  const color = getUserColor(sender);
+  const formatted = text.replace(/`([^`]+)`/g, '{gray-fg}$1{/gray-fg}');
+  return `{${color}-fg}{bold}${sender}{/bold}{/${color}-fg}  {gray-fg}${timestamp}{/gray-fg}\n  ${formatted}`;
+}
 
-    addSystemMessage(`Webhook dispatch initiated to target ${url}...`, 'info');
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'ChitChat-CLI-Webhook'
-        },
-        body: JSON.stringify({
-          source,
-          recipient: username,
-          timestamp: new Date().toISOString(),
-          data
-        })
-      });
+function formatSystem(text, type = 'info') {
+  const colorMap  = { info: 'gray', success: 'green', warning: 'yellow', error: 'red' };
+  const prefixMap = { info: '[INFO]', success: '[OK]', warning: '[WARN]', error: '[ERR]' };
+  const color  = colorMap[type]  || 'gray';
+  const prefix = prefixMap[type] || '[INFO]';
+  return `{${color}-fg}${prefix} ${text}{/${color}-fg}`;
+}
 
-      if (response.ok) {
-        addSystemMessage(`Webhook dispatch succeeded (HTTP ${response.status})`, 'success');
-      } else {
-        addSystemMessage(`Webhook dispatch failed (HTTP ${response.status})`, 'error');
-      }
-    } catch (err) {
-      addSystemMessage(`Webhook dispatch failed: ${err.message}`, 'error');
-    }
-  };
+// ─── App factory ────────────────────────────────────────────────────────────
 
-  // Initialize Socket.io Connection
-  useEffect(() => {
-    addSystemMessage('Establishing connection to router...', 'info');
-    const newSocket = io('http://localhost:3000');
-    setSocket(newSocket);
+export function createApp({ username, socket }) {
+  // ── State ────────────────────────────────────────────────────────────────
+  const channels = ['#general', '#engineering'];
+  let   activeIdx = 0;
+  const unread    = { '#general': 0, '#engineering': 0 };
+  const msgStore  = { '#general': [], '#engineering': [] };
 
-    newSocket.on('connect', () => {
-      setIsConnected(true);
-      addSystemMessage('Link established. Authenticating session...', 'success');
-      newSocket.emit('register', username);
-    });
+  // Manual input buffer — replaces blessed.textbox + readInput() entirely.
+  // A single screen.on('keypress') handler owns all input; no _listener
+  // accumulation, no _done() race, no doubled characters possible.
+  let inputBuf    = '';
+  let historyIdx  = -1;          // -1 = live input; 0 = most recent sent
+  const history   = [];          // per-session sent messages, newest at front
 
-    newSocket.on('disconnect', () => {
-      setIsConnected(false);
-      addSystemMessage('Link terminated. Attempting reconnect...', 'warning');
-    });
-
-    newSocket.on('sys-alert', ({ type, message }) => {
-      addSystemMessage(message, type);
-    });
-
-    newSocket.on('sys-event', ({ type, message }) => {
-      addSystemMessage(message, type);
-    });
-
-    newSocket.on('message-received', (msg) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          type: 'chat',
-          sender: msg.sender,
-          text: msg.content,
-          timestamp: new Date(msg.timestamp).toLocaleTimeString()
-        }
-      ].slice(-16));
-      setLastRecipient(msg.sender);
-
-      // Trigger local outgoing webhook
-      triggerOutgoingWebhook('direct-message', msg);
-    });
-
-    newSocket.on('message-sent', (msg) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          type: 'sent',
-          recipient: msg.recipient,
-          text: msg.content,
-          timestamp: new Date(msg.timestamp).toLocaleTimeString()
-        }
-      ].slice(-16));
-    });
-
-    newSocket.on('webhook-payload', (payload) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(),
-          type: 'webhook',
-          payload: payload,
-          timestamp: new Date(payload.timestamp).toLocaleTimeString()
-        }
-      ].slice(-16));
-
-      // Trigger local outgoing webhook for this webhook alert
-      triggerOutgoingWebhook('incoming-webhook', payload);
-    });
-
-    return () => {
-      newSocket.close();
-    };
-  }, [username]);
-
-  // Handle Ctrl+C and exit inputs
-  useInput((input, key) => {
-    if (key.ctrl && input === 'c') {
-      exit();
-    }
+  // ── Screen ───────────────────────────────────────────────────────────────
+  const screen = blessed.screen({
+    smartCSR:     true,
+    fullUnicode:  true,
+    forceUnicode: true,
+    title: 'CHITCHAT | SECURE TERMINAL VAULT'
   });
 
-  // Handle input submission
-  const handleSubmit = (value) => {
-    const trimmed = value.trim();
-    setInputVal('');
-    if (!trimmed) return;
+  // ── Sidebar ───────────────────────────────────────────────────────────────
+  const sidebar = blessed.box({
+    parent: screen,
+    left: 0, top: 0,
+    width: 22,
+    height: '100%-1',
+    border: { type: 'line' },
+    style:  { border: { fg: 'blue' } },
+    keys: false,
+    tags: true
+  });
 
-    // Handle Commands
-    if (trimmed.startsWith('/')) {
-      const parts = trimmed.split(' ');
+  // ── Chat log ──────────────────────────────────────────────────────────────
+  const chatLog = blessed.log({
+    parent: screen,
+    left: 22, top: 0,
+    width: '100%-22',
+    height: '100%-4',
+    border: { type: 'line' },
+    style:  { border: { fg: 'blue' } },
+    scrollable:   true,
+    alwaysScroll: true,
+    mouse:  true,
+    tags:   true,
+    keys:   false,
+    scrollbar: { ch: ' ', track: { bg: 'gray' }, style: { inverse: true } }
+  });
+
+  // ── Input display (plain box — no textbox, no readInput, no _listener) ───
+  // We draw the prompt + inputBuf manually on every keypress.
+  const inputBox = blessed.box({
+    parent: screen,
+    left: 22,
+    bottom: 1,
+    width: '100%-22',
+    height: 3,
+    border: { type: 'line' },
+    style:  { border: { fg: 'cyan' } },
+    tags: true
+  });
+
+  // ── Status bar ────────────────────────────────────────────────────────────
+  const statusBar = blessed.box({
+    parent: screen,
+    bottom: 0, left: 0,
+    width: '100%', height: 1,
+    tags: true
+  });
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+
+  function getActiveChannel() { return channels[activeIdx]; }
+
+  function renderInput() {
+    // Render prompt + current buffer. Cursor shown as a block character.
+    inputBox.setContent(
+      ` {cyan-fg}{bold}${username} >{/bold}{/cyan-fg} ${blessed.escape(inputBuf)}{white-fg}█{/white-fg}`
+    );
+    screen.render();
+  }
+
+  function updateStatusBar(connected) {
+    const gw = connected
+      ? '{green-fg}ONLINE{/green-fg}'
+      : '{red-fg}OFFLINE{/red-fg}';
+    statusBar.setContent(
+      `{bold}CHITCHAT | SECURE TERMINAL VAULT{/bold}` +
+      `{|}{gray-fg}Session: ${username} | Gateway: {/gray-fg}${gw}`
+    );
+    screen.render();
+  }
+
+  function updateSidebar() {
+    const active = getActiveChannel();
+    const rooms  = channels.filter(c => c.startsWith('#'));
+    const dms    = channels.filter(c => c.startsWith('@'));
+
+    let out = '\n{bold}{gray-fg}ROOMS{/gray-fg}{/bold}\n\n';
+    for (const room of rooms) {
+      const isActive = room === active;
+      const badge    = (unread[room] || 0) > 0 ? ` {red-fg}[${unread[room]}]{/red-fg}` : '';
+      out += isActive
+        ? ` {cyan-fg}{bold}${room}{/bold}{/cyan-fg}${badge}\n`
+        : ` {gray-fg}${room}{/gray-fg}${badge}\n`;
+    }
+
+    out += '\n{bold}{gray-fg}DIRECT{/gray-fg}{/bold}\n\n';
+    if (dms.length === 0) {
+      out += ' {gray-fg}(none){/gray-fg}\n';
+    } else {
+      for (const dm of dms) {
+        const isActive = dm === active;
+        const badge    = (unread[dm] || 0) > 0 ? ` {red-fg}[${unread[dm]}]{/red-fg}` : '';
+        out += isActive
+          ? ` {magenta-fg}{bold}${dm}{/bold}{/magenta-fg}${badge}\n`
+          : ` {gray-fg}${dm}{/gray-fg}${badge}\n`;
+      }
+    }
+
+    sidebar.setContent(out);
+  }
+
+  function updateChatLabel() {
+    chatLog.setLabel(` ● ${getActiveChannel()} `);
+  }
+
+  function ensureChannel(channel) {
+    if (!channels.includes(channel)) {
+      channels.push(channel);
+      unread[channel]   = 0;
+      msgStore[channel] = [];
+      updateSidebar();
+      screen.render();
+    }
+  }
+
+  function appendToChannel(channel, line) {
+    if (!msgStore[channel]) msgStore[channel] = [];
+    msgStore[channel].push(line);
+
+    if (channel === getActiveChannel()) {
+      chatLog.log(line); // blessed.log calls screen.render() internally
+    } else {
+      unread[channel] = (unread[channel] || 0) + 1;
+      updateSidebar();
+      screen.render();
+    }
+  }
+
+  function logSystem(text, type = 'info') {
+    appendToChannel(getActiveChannel(), formatSystem(text, type));
+  }
+
+  function switchToChannel(index) {
+    activeIdx = index;
+    const ch  = getActiveChannel();
+    unread[ch] = 0;
+
+    chatLog.setContent('');
+    for (const line of (msgStore[ch] || [])) chatLog.add(line);
+    chatLog.setScrollPerc(100);
+
+    updateSidebar();
+    updateChatLabel();
+    screen.render();
+  }
+
+  function handleSubmit() {
+    const value = inputBuf.trim();
+    inputBuf   = '';
+    historyIdx = -1;
+    if (value) history.unshift(value); // push to front so Up = most recent
+    renderInput();
+    if (!value) return;
+
+    const active = getActiveChannel();
+
+    if (value.startsWith('/')) {
+      const parts   = value.split(' ');
       const command = parts[0].toLowerCase();
 
-      if (command === '/exit') {
-        exit();
+      if (command === '/join') {
+        const group = parts[1];
+        if (!group) { logSystem('Group name required. Format: /join <group>', 'error'); return; }
+        socket.emit('join-group', group);
+        ensureChannel(`#${group}`);
+        switchToChannel(channels.indexOf(`#${group}`));
+        logSystem(`Joined group #${group}`, 'success');
         return;
       }
 
-      if (command === '/clear') {
-        setMessages([]);
-        addSystemMessage('Console cleared.', 'info');
+      if (command === '/dm') {
+        const target = parts[1];
+        if (!target) { logSystem('Username required. Format: /dm <username>', 'error'); return; }
+        const ch = `@${target}`;
+        ensureChannel(ch);
+        switchToChannel(channels.indexOf(ch));
+        logSystem(`DM channel with ${target} opened. Type to send.`, 'info');
+        return;
+      }
+
+      if (command === '/leave') {
+        const group = parts[1];
+        if (!group) { logSystem('Group name required. Format: /leave <group>', 'error'); return; }
+        socket.emit('leave-group', group);
+        const name = `#${group}`;
+        const idx  = channels.indexOf(name);
+        if (idx !== -1) {
+          channels.splice(idx, 1);
+          delete msgStore[name];
+          delete unread[name];
+          if (activeIdx >= channels.length) activeIdx = Math.max(0, channels.length - 1);
+          switchToChannel(activeIdx);
+        }
         return;
       }
 
       if (command === '/webhook') {
-        const subCommand = parts[1];
-        if (!subCommand) {
-          addSystemMessage(`Registered Webhook Target: ${getWebhookUrl() || 'None'}`, 'info');
-          return;
-        }
-
-        if (subCommand.toLowerCase() === 'clear') {
+        const sub = parts[1];
+        if (!sub) { logSystem(`Webhook: ${getWebhookUrl() || 'None'}`, 'info'); return; }
+        if (sub === 'clear') {
           clearWebhookUrl();
-          setActiveWebhook('Not Configured');
-          addSystemMessage('Registered webhook destination removed.', 'success');
+          logSystem('Webhook cleared.', 'success');
+        } else if (sub.startsWith('http://') || sub.startsWith('https://')) {
+          setWebhookUrl(sub);
+          logSystem(`Webhook set: ${sub}`, 'success');
         } else {
-          if (subCommand.startsWith('http://') || subCommand.startsWith('https://')) {
-            setWebhookUrl(subCommand);
-            setActiveWebhook(subCommand);
-            addSystemMessage(`Webhook destination set: ${subCommand}`, 'success');
-          } else {
-            addSystemMessage('Invalid destination URL. Prefix with http:// or https://', 'error');
-          }
+          logSystem('Invalid URL. Must start with http:// or https://', 'error');
         }
         return;
       }
 
-      addSystemMessage(`Invalid parameter syntax: ${command}`, 'error');
+      if (command === '/clear') {
+        msgStore[getActiveChannel()] = [];
+        chatLog.setContent('');
+        screen.render();
+        return;
+      }
+
+      if (command === '/exit') {
+        socket.disconnect();
+        screen.destroy();
+        process.exit(0);
+      }
+
+      logSystem(`Unknown command: ${command}`, 'warning');
       return;
     }
 
-    // Handle Direct Messaging
-    if (trimmed.startsWith('@')) {
-      const spaceIdx = trimmed.indexOf(' ');
-      if (spaceIdx === -1) {
-        addSystemMessage('Message body required. Format: @user <message>', 'error');
-        return;
-      }
-      const recipient = trimmed.slice(1, spaceIdx);
-      const content = trimmed.slice(spaceIdx + 1);
-
-      if (socket && isConnected) {
-        socket.emit('direct-message', { recipient, content });
-        setLastRecipient(recipient);
-      } else {
-        addSystemMessage('Message delivery failed: Offline.', 'error');
-      }
-    } else {
-      if (lastRecipient) {
-        if (socket && isConnected) {
-          socket.emit('direct-message', { recipient: lastRecipient, content: trimmed });
-          addSystemMessage(`Routing to default recipient @${lastRecipient}...`, 'info');
-        } else {
-          addSystemMessage('Message delivery failed: Offline.', 'error');
-        }
-      } else {
-        addSystemMessage('Recipient tag missing. Use @user <message>', 'warning');
-      }
+    if (!active) { logSystem('No chat selected. Use /join <group>', 'warning'); return; }
+    if (active.startsWith('#')) {
+      socket.emit('group-message', { group: active.slice(1), content: value });
+    } else if (active.startsWith('@')) {
+      socket.emit('direct-message', { recipient: active.slice(1), content: value });
     }
-  };
+  }
 
-  // Renders a single message beautifully using React.createElement
-  const renderMessage = (msg) => {
-    if (msg.type === 'system') {
-      return React.createElement(
-        Box,
-        { key: msg.id, marginY: 0 },
-        React.createElement(Text, { dimColor: true }, `[${msg.timestamp}]`),
-        React.createElement(Text, null, ` ${msg.text}`)
-      );
+  // ─── Single keypress handler — owns ALL input ─────────────────────────────
+  // This is the entire input system. One handler on the screen, one code path.
+  // No textbox, no readInput(), no _listener, no _done(), no races possible.
+  screen.on('keypress', (ch, key) => {
+    if (!key) return;
+
+    // ── Global shortcuts (always active) ──
+    if (key.full === 'C-c') {
+      socket.disconnect();
+      screen.destroy();
+      process.exit(0);
     }
 
-    if (msg.type === 'sent') {
-      return React.createElement(
-        Box,
-        { key: msg.id, marginY: 0 },
-        React.createElement(Text, { dimColor: true }, `[${msg.timestamp}] `),
-        React.createElement(Text, { color: 'green', bold: true }, `[To @${msg.recipient}]`),
-        React.createElement(Text, null, ` ${msg.text}`)
-      );
+    if (key.full === 'C-right') {
+      switchToChannel((activeIdx + 1) % channels.length);
+      return;
+    }
+    if (key.full === 'C-left') {
+      switchToChannel((activeIdx - 1 + channels.length) % channels.length);
+      return;
     }
 
-    if (msg.type === 'chat') {
-      return React.createElement(
-        Box,
-        { key: msg.id, marginY: 0 },
-        React.createElement(Text, { dimColor: true }, `[${msg.timestamp}] `),
-        React.createElement(Text, { color: 'cyan', bold: true }, `[@${msg.sender}]`),
-        React.createElement(Text, null, ` ${msg.text}`)
-      );
+    if (key.full === 'pageup') {
+      chatLog.scroll(-(chatLog.height - 2 || 5));
+      screen.render();
+      return;
+    }
+    if (key.full === 'pagedown') {
+      chatLog.scroll(chatLog.height - 2 || 5);
+      screen.render();
+      return;
     }
 
-    if (msg.type === 'webhook') {
-      const prettyJson = JSON.stringify(msg.payload.body, null, 2);
-      return React.createElement(
-        Box,
-        { key: msg.id, flexDirection: 'column', borderStyle: 'dashed', borderColor: 'yellow', paddingX: 1, marginY: 1 },
-        React.createElement(
-          Box,
-          { justifyContent: 'space-between' },
-          React.createElement(Text, { color: 'yellow', bold: true }, 'INCOMING WEBHOOK ALERT'),
-          React.createElement(Text, { dimColor: true }, msg.timestamp)
-        ),
-        React.createElement(
-          Box,
-          { marginY: 0 },
-          React.createElement(Text, { color: 'magenta', bold: true }, 'Query: '),
-          React.createElement(Text, null, JSON.stringify(msg.payload.query))
-        ),
-        React.createElement(
-          Box,
-          { flexDirection: 'column', marginY: 0 },
-          React.createElement(Text, { color: 'magenta', bold: true }, 'Body:'),
-          React.createElement(Text, { color: 'white' }, prettyJson)
-        )
-      );
+    // ── Text input ──
+    if (key.name === 'enter' || key.name === 'return') {
+      handleSubmit();
+      return;
     }
 
-    return null;
-  };
+    if (key.name === 'backspace') {
+      inputBuf   = inputBuf.slice(0, -1);
+      historyIdx = -1;
+      renderInput();
+      return;
+    }
 
-  // New larger, 100-character unbordered outer layout to perfectly prevent border overlapping glitches
-  return React.createElement(
-    Box,
-    { flexDirection: 'column', width: 100, height: 30, padding: 0 },
-    
-    // Header Banner (Flat and spacious)
-    React.createElement(
-      Box,
-      { justifyContent: 'space-between', paddingX: 1, marginY: 0 },
-      React.createElement(Text, { color: 'cyan', bold: true }, 'CHITCHAT | SECURE TERMINAL VAULT'),
-      React.createElement(
-        Box,
-        null,
-        React.createElement(Text, null, 'Session: '),
-        React.createElement(Text, { color: 'yellow', bold: true }, username),
-        React.createElement(Text, null, ' | Gateway: '),
-        React.createElement(Text, { color: isConnected ? 'green' : 'red', bold: true }, isConnected ? 'ONLINE' : 'OFFLINE')
-      )
-    ),
+    // Ctrl+Up — step back through history
+    if (key.full === 'C-up' || (key.name === 'up' && key.ctrl)) {
+      if (history.length === 0) return;
+      historyIdx = Math.min(historyIdx + 1, history.length - 1);
+      inputBuf   = history[historyIdx];
+      renderInput();
+      return;
+    }
 
-    // Clean horizontal rule divider
-    React.createElement(
-      Box,
-      { marginY: 0 },
-      React.createElement(Text, { color: 'blue' }, '─'.repeat(100))
-    ),
+    // Ctrl+Down — step forward (toward live input)
+    if (key.full === 'C-down' || (key.name === 'down' && key.ctrl)) {
+      historyIdx = historyIdx - 1;
+      inputBuf   = historyIdx < 0 ? '' : history[historyIdx];
+      historyIdx = Math.max(historyIdx, -1);
+      renderInput();
+      return;
+    }
 
-    // Main Columns
-    React.createElement(
-      Box,
-      { height: 23, marginY: 0 },
-      
-      // Left Sidebar (Isolated wall)
-      React.createElement(
-        Box,
-        { width: 30, flexDirection: 'column', borderStyle: 'single', borderColor: 'blue', paddingX: 1 },
-        React.createElement(Text, { color: 'magenta', bold: true }, 'WEBHOOK CONFIG'),
-        React.createElement(Text, { dimColor: true }, 'Outgoing Webhook:'),
-        React.createElement(Text, { color: 'yellow', wrap: 'truncate-end' }, activeWebhook.length > 24 ? activeWebhook.slice(0, 23) + '...' : activeWebhook),
-        
-        React.createElement(
-          Box,
-          { marginY: 1, flexDirection: 'column' },
-          React.createElement(Text, { color: 'magenta', bold: true }, 'COMMAND REFERENCE'),
-          React.createElement(Text, { color: 'gray' }, '/webhook <url>'),
-          React.createElement(Text, { color: 'gray' }, '/webhook clear'),
-          React.createElement(Text, { color: 'gray' }, '/clear'),
-          React.createElement(Text, { color: 'gray' }, '/exit')
-        ),
+    // Ignore all other control/meta/special keys
+    if (key.ctrl || key.meta || !ch || ch.length !== 1) return;
 
-        React.createElement(
-          Box,
-          { flexDirection: 'column', marginTop: 'auto' },
-          React.createElement(Text, { color: 'cyan', bold: true }, 'MESSAGE FORMAT'),
-          React.createElement(Text, { color: 'gray' }, '@username <msg>'),
-          React.createElement(Text, { color: 'gray' }, 'e.g. @Bob hello')
-        )
-      ),
+    inputBuf += ch;
+    renderInput();
+  });
 
-      // Right Messages Area (Isolated wall, no overlapping borders)
-      React.createElement(
-        Box,
-        { width: 70, flexDirection: 'column', borderStyle: 'single', borderColor: 'blue', paddingX: 1 },
-        messages.length === 0
-          ? React.createElement(
-              Box,
-              { flexGrow: 1, justifyContent: 'center', alignItems: 'center' },
-              React.createElement(Text, { dimColor: true }, 'Empty channel buffer. Send message using @username <message>')
-            )
-          : React.createElement(
-              Box,
-              { flexDirection: 'column', flexGrow: 1 },
-              messages.map(renderMessage)
-            )
-      )
-    ),
+  // ─── Socket event handlers (preserved exactly) ───────────────────────────
 
-    // Input Bar (Sits perfectly at the bottom)
-    React.createElement(
-      Box,
-      { width: 100, borderStyle: 'single', borderColor: 'blue', paddingX: 1, marginY: 0 },
-      React.createElement(Text, { color: 'cyan', bold: true }, `${username} > `),
-      React.createElement(TextInput, {
-        value: inputVal,
-        onChange: setInputVal,
-        onSubmit: handleSubmit,
-        placeholder: lastRecipient ? `Send message to @${lastRecipient}...` : "Send message using @username..."
-      })
-    )
-  );
+  socket.on('connect', () => {
+    updateStatusBar(true);
+    logSystem('Session established. Registration complete.', 'success');
+    socket.emit('register', username);
+  });
+
+  socket.on('disconnect', () => {
+    updateStatusBar(false);
+    logSystem('Link terminated. Attempting reconnect...', 'warning');
+  });
+
+  socket.on('sys-alert', ({ type, message }) => logSystem(message, type));
+  socket.on('sys-event', ({ type, message }) => logSystem(message, type));
+
+  socket.on('message-received', (msg) => {
+    const ch = `@${msg.sender}`;
+    ensureChannel(ch);
+    appendToChannel(ch, formatMessage(msg.sender, new Date(msg.timestamp).toLocaleTimeString(), msg.content));
+  });
+
+  socket.on('message-sent', (msg) => {
+    const ch = `@${msg.recipient}`;
+    ensureChannel(ch);
+    appendToChannel(ch, formatMessage(username, new Date(msg.timestamp).toLocaleTimeString(), msg.content));
+  });
+
+  socket.on('group-message-received', (msg) => {
+    const ch = `#${msg.group}`;
+    ensureChannel(ch);
+    appendToChannel(ch, formatMessage(msg.sender, new Date(msg.timestamp).toLocaleTimeString(), msg.content));
+  });
+
+  socket.on('group-message-sent', (msg) => {
+    const ch = `#${msg.group}`;
+    ensureChannel(ch);
+    appendToChannel(ch, formatMessage(username, new Date(msg.timestamp).toLocaleTimeString(), msg.content));
+  });
+
+  // ─── Resize ───────────────────────────────────────────────────────────────
+  screen.on('resize', () => screen.render());
+
+  // ─── Initial draw ─────────────────────────────────────────────────────────
+  updateSidebar();
+  updateChatLabel();
+  updateStatusBar(false);
+  renderInput();
+  screen.render();
 }

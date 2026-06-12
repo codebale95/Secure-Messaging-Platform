@@ -26,8 +26,8 @@ function saveConfig(config) {
   try {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
     return true;
-  } catch (error) {
-    console.error('Failed to save config:', error);
+  } catch (_error) {
+    // Fail silently — never write outside the Ink component tree
     return false;
   }
 }
