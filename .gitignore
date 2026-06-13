@@ -17,3 +17,6 @@ node_modules/
 # Local configurations
 client/config.json
 *.log
+#env file
+.env
+.keys_*.json

@@ -1,151 +1,78 @@
-![ieeecs-template-header](https://github.com/user-attachments/assets/c3c40c85-51a2-4a5e-82a4-c32a0223e336)
+# ChatHere - Secure CLI Vault
 
-<h1 align="center">Secure Messaging Platform</h1>
----
+A fully End-to-End Encrypted (E2EE) terminal chat application built with Node.js, Socket.IO, and React-Ink.
 
+This application uses **Elliptic Curve Diffie-Hellman (ECDH)** over the `secp256k1` curve to securely exchange keys, ensuring that your chat messages are mathematically impossible to read by the server routing them. All encrypted messages are permanently persisted in a Supabase PostgreSQL database for offline delivery.
 
-# Contributing Guide
+## Architecture Highlights
+- **E2E Encryption**: Messages are encrypted locally on your machine before they ever touch the internet.
+- **Offline Messaging**: If a user is offline, the server holds onto their Public Key and securely queues the encrypted ciphertext in the database.
+- **Persistent Ephemeral Keys**: Private Keys are generated and stored securely in a local hidden file (`.keys_<username>.json`) ensuring you can always decrypt your offline messages without compromising security.
 
-This guide explains how to fork a repository, clone it, make changes, and create Pull Requests (PRs).
+## Prerequisites
+- [Node.js](https://nodejs.org/) (v16 or higher)
+- A [Supabase](https://supabase.com/) project (for the PostgreSQL database)
 
-## 1. Fork the Repository
-
-1. Open the repository on GitHub
-2. Click **Fork** (top-right corner)
-3. Select your GitHub account
-
-This creates:
-
-`https://github.com/YOUR_USERNAME/REPOSITORY_NAME`
-
----
-
-## 2. Clone the Forked Repository
-
-```bash
-git clone https://github.com/YOUR_USERNAME/REPOSITORY_NAME.git
-
-cd REPOSITORY_NAME
+## Database Setup (Supabase)
+Create a table in your Supabase project with the following schema:
+```sql
+CREATE TABLE public.messages (
+    id SERIAL PRIMARY KEY,
+    sender VARCHAR NOT NULL,
+    recipient VARCHAR NOT NULL,
+    content TEXT NOT NULL,
+    delivered BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
 ```
 
-Check remotes:
-
+## Installation
+First, install the dependencies for both the client and the server.
 ```bash
-git remote -v
+# Install Server dependencies
+cd server
+npm install
+
+# Install Client dependencies
+cd ../client
+npm install
 ```
 
----
-
-## 3. Add Upstream Repository
-
-```bash
-git remote add upstream https://github.com/ORIGINAL_OWNER/REPOSITORY_NAME.git
+## Configuration
+Create a `.env` file in the root directory (the same folder as this README) with your Supabase credentials:
+```env
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_ANON_KEY=your-anon-key
 ```
 
-Verify:
+## Running the Application
 
+You will need to open multiple terminal windows.
+
+### 1. Start the Server
+In your first terminal, start the central Socket.IO router:
 ```bash
-git remote -v
+cd server
+npm start
 ```
 
-Expected output:
+### 2. Start the Clients
+In your second terminal, launch the chat client. You must provide a unique username:
+```bash
+cd client
+npm start -- --username Alice
+```
 
+Open a third terminal for the recipient:
+```bash
+cd client
+npm start -- --username Bob
+```
+
+## Usage
+To send an encrypted message, simply tag the user and type your message:
 ```text
-origin    https://github.com/YOUR_USERNAME/REPOSITORY_NAME.git
-upstream  https://github.com/ORIGINAL_OWNER/REPOSITORY_NAME.git
+Alice > @Bob Hello! This message is end-to-end encrypted!
 ```
 
----
-
-## 4. Create a Branch
-
-Do not work directly on `main`.
-
-```bash
-git checkout -b feature/your-feature-name
-```
-
-Example:
-
-```bash
-git checkout -b feature/login-page
-```
-
----
-
-## 5. Make Changes
-
-Check status:
-
-```bash
-git status
-```
-
-Stage files:
-
-```bash
-git add .
-```
-
-Commit:
-
-```bash
-git commit -m "Add login page implementation"
-```
-
----
-
-## 6. Push Changes
-
-```bash
-git push origin feature/your-feature-name
-```
-
-Example:
-
-```bash
-git push origin feature/login-page
-```
-
----
-
-## 7. Create a Pull Request (PR)
-
-1. Open your fork on GitHub
-2. Click **Compare & Pull Request**
-3. Add title and description
-4. Click **Create Pull Request**
-
----
-
-## Keep Your Fork Updated
-
-```bash
-git fetch upstream
-
-git checkout main
-
-git merge upstream/main
-
-git push origin main
-```
-
----
-
-## Workflow Summary
-
-```text
-Fork Repo
-   ↓
-Clone Fork
-   ↓
-Create Branch
-   ↓
-Make Changes
-   ↓
-Commit
-   ↓
-Push
-   ↓
-Open PR
-```
+If Bob is offline, the message will be queued in Supabase and delivered the moment he logs in.
