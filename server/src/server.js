@@ -2,12 +2,14 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const supabase = require('./db');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -15,15 +17,22 @@ const io = new Server(server, {
   }
 });
 
-// Map to store active connections: username -> socket
+// Active users
 const activeUsers = new Map();
-// Simple in-memory queue for offline webhook messages: username -> Array of payloads
+
+// Public Keys for ECDH
+const publicKeys = new Map();
+
+// Offline webhook storage (still in memory)
 const offlineWebhooks = new Map();
 
-// HTTP Incoming Webhook Endpoint
-// Exposes POST /api/webhooks/incoming/:username
+
+// =============================
+// WEBHOOK ENDPOINT
+// =============================
 app.post('/api/webhooks/incoming/:username', (req, res) => {
   const { username } = req.params;
+
   const payload = {
     timestamp: new Date().toISOString(),
     headers: req.headers,
@@ -34,50 +43,76 @@ app.post('/api/webhooks/incoming/:username', (req, res) => {
   const recipientSocket = activeUsers.get(username);
 
   if (recipientSocket && recipientSocket.connected) {
-    // Deliver instantly via Socket.io
+
     recipientSocket.emit('webhook-payload', payload);
+
     return res.status(200).json({
       status: 'delivered',
-      message: `Webhook payload delivered to active session of user '${username}'`
+      message: `Webhook delivered to '${username}'`
     });
+
   } else {
-    // Buffer the webhook payload in memory for when the user logs in
+
     if (!offlineWebhooks.has(username)) {
       offlineWebhooks.set(username, []);
     }
+
     offlineWebhooks.get(username).push(payload);
-    
-    // Cap offline buffer size to prevent memory leaks
+
     if (offlineWebhooks.get(username).length > 50) {
       offlineWebhooks.get(username).shift();
     }
 
     return res.status(202).json({
       status: 'buffered',
-      message: `User '${username}' is currently offline. Webhook payload has been buffered in memory.`
+      message: `User '${username}' offline. Webhook buffered.`
     });
   }
 });
 
-// Socket.io connection logic
+
+// =============================
+// SOCKET.IO
+// =============================
 io.on('connection', (socket) => {
+
   let registeredUsername = null;
 
-  // Handle user registration
-  socket.on('register', (username) => {
+  // =============================
+  // REGISTER USER
+  // =============================
+  socket.on('register', async (payload) => {
+    
+    const username = typeof payload === 'string' ? payload : payload.username;
+    const publicKey = payload.publicKey;
+
     if (!username || typeof username !== 'string') {
-      socket.emit('sys-alert', { type: 'error', message: 'Invalid username' });
+      socket.emit('sys-alert', {
+        type: 'error',
+        message: 'Invalid username'
+      });
       return;
     }
 
-    // Check if username is already taken by a different socket
+    if (publicKey) {
+      publicKeys.set(username, publicKey);
+    }
+
     const existingSocket = activeUsers.get(username);
-    if (existingSocket && existingSocket.id !== socket.id) {
-      socket.emit('sys-alert', { type: 'error', message: `Username '${username}' is already in use by another session.` });
+
+    if (
+      existingSocket &&
+      existingSocket.id !== socket.id
+    ) {
+      socket.emit('sys-alert', {
+        type: 'error',
+        message: `Username '${username}' already in use`
+      });
       return;
     }
 
     registeredUsername = username;
+
     activeUsers.set(username, socket);
 
     socket.emit('sys-alert', {
@@ -85,32 +120,94 @@ io.on('connection', (socket) => {
       message: `Session established for user '${username}'. Registration complete.`
     });
 
-    // Notify others that a user has joined
     socket.broadcast.emit('sys-event', {
       type: 'info',
       message: `${username} online.`
     });
 
-    // Check if there are any buffered webhooks for this user
+    // =============================
+    // DELIVER OFFLINE DATABASE MESSAGES
+    // =============================
+    try {
+
+      const { data: messages, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('recipient', username)
+        .eq('delivered', false)
+        .order('created_at', { ascending: true });
+
+      if (error) throw error;
+
+      for (const msg of messages || []) {
+
+        socket.emit('message-received', {
+          sender: msg.sender,
+          content: msg.content,
+          timestamp: msg.created_at
+        });
+
+        await supabase
+          .from('messages')
+          .update({ delivered: true })
+          .eq('id', msg.id);
+      }
+
+      if (messages && messages.length > 0) {
+
+        socket.emit('sys-alert', {
+          type: 'info',
+          message: `${messages.length} offline message(s) delivered.`
+        });
+
+      }
+
+    } catch (err) {
+
+      console.error('Failed to load offline messages:', err);
+
+    }
+
+    // =============================
+    // DELIVER OFFLINE WEBHOOKS
+    // =============================
     const pending = offlineWebhooks.get(username);
+
     if (pending && pending.length > 0) {
+
       socket.emit('sys-alert', {
         type: 'info',
-        message: `Retrieved ${pending.length} buffered webhook event(s) from offline storage.`
+        message: `Retrieved ${pending.length} buffered webhook event(s).`
       });
-      // Deliver all pending webhooks
+
       pending.forEach((payload) => {
         socket.emit('webhook-payload', payload);
       });
-      // Clear queue
+
       offlineWebhooks.delete(username);
     }
+
   });
 
-  // Handle direct messaging between users
-  socket.on('direct-message', ({ recipient, content }) => {
+  // =============================
+  // PUBLIC KEY EXCHANGE
+  // =============================
+  socket.on('get-public-key', (targetUser, callback) => {
+    callback(publicKeys.get(targetUser) || null);
+  });
+
+  // =============================
+  // DIRECT MESSAGE
+  // =============================
+  socket.on('direct-message', async ({ recipient, content }) => {
+
     if (!registeredUsername) {
-      socket.emit('sys-alert', { type: 'error', message: 'You must register a username first.' });
+
+      socket.emit('sys-alert', {
+        type: 'error',
+        message: 'You must register first.'
+      });
+
       return;
     }
 
@@ -119,88 +216,101 @@ io.on('connection', (socket) => {
     }
 
     const recipientSocket = activeUsers.get(recipient);
+
     const messagePayload = {
       sender: registeredUsername,
-      content: content,
+      content,
       timestamp: new Date().toISOString()
     };
 
-    // Send back to sender for visual rendering confirmation
-    socket.emit('message-sent', { recipient, content, timestamp: messagePayload.timestamp });
+    socket.emit('message-sent', {
+      recipient,
+      content,
+      timestamp: messagePayload.timestamp
+    });
 
-    if (recipientSocket && recipientSocket.connected) {
+    // =============================
+    // CHECK IF ONLINE
+    // =============================
+    const isOnline = recipientSocket && recipientSocket.connected;
+
+    if (isOnline) {
       recipientSocket.emit('message-received', messagePayload);
-    } else {
+    }
+
+    // =============================
+    // SAVE EVERY MESSAGE TO DB
+    // =============================
+    try {
+
+      const { error } = await supabase
+        .from('messages')
+        .insert({
+          sender: registeredUsername,
+          recipient: recipient,
+          content: content,
+          delivered: isOnline
+        });
+      if (error) throw error;
+
+      if (!isOnline) {
+        socket.emit('sys-alert', {
+          type: 'warning',
+          message: `Recipient '${recipient}' is offline. Message stored in database.`
+        });
+      }
+
+    } catch (err) {
+
+      console.error('Database insert error:', err);
+
       socket.emit('sys-alert', {
-        type: 'warning',
-        message: `Recipient '${recipient}' is offline. Delivery pending.`
+        type: 'error',
+        message: 'Failed to store message.'
       });
-    }
-  });
 
-  // Handle join group
-  socket.on('join-group', (groupName) => {
-    if (!registeredUsername) {
-      socket.emit('sys-alert', { type: 'error', message: 'You must register a username first.' });
-      return;
-    }
-    if (!groupName) return;
-
-    socket.join(groupName);
-    socket.emit('sys-alert', { type: 'success', message: `Joined group #${groupName}` });
-    socket.to(groupName).emit('sys-event', { type: 'info', message: `${registeredUsername} joined #${groupName}` });
-  });
-
-  // Handle leave group
-  socket.on('leave-group', (groupName) => {
-    if (!registeredUsername) return;
-    if (!groupName) return;
-
-    socket.leave(groupName);
-    socket.emit('sys-alert', { type: 'info', message: `Left group #${groupName}` });
-    socket.to(groupName).emit('sys-event', { type: 'info', message: `${registeredUsername} left #${groupName}` });
-  });
-
-  // Handle group messaging
-  socket.on('group-message', ({ group, content }) => {
-    if (!registeredUsername) {
-      socket.emit('sys-alert', { type: 'error', message: 'You must register a username first.' });
-      return;
     }
 
-    if (!group || !content) return;
-
-    const messagePayload = {
-      sender: registeredUsername,
-      group: group,
-      content: content,
-      timestamp: new Date().toISOString()
-    };
-
-    // Send back to sender for visual rendering confirmation
-    socket.emit('group-message-sent', { group, content, timestamp: messagePayload.timestamp });
-
-    // Broadcast to the room, except sender
-    socket.to(group).emit('group-message-received', messagePayload);
   });
 
-  // Handle disconnect
+
+  // =============================
+  // DISCONNECT
+  // =============================
   socket.on('disconnect', () => {
+
     if (registeredUsername) {
-      activeUsers.delete(registeredUsername);
+
+      activeUsers.delete(
+        registeredUsername
+      );
+      // Keep public key in memory so offline users can still receive E2EE messages!
+
       socket.broadcast.emit('sys-event', {
         type: 'info',
         message: `${registeredUsername} offline.`
       });
+
     }
+
   });
+
 });
 
+
+// =============================
+// START SERVER
+// =============================
 const PORT = process.env.PORT || 3000;
+
 server.listen(PORT, () => {
-  console.log(`\n==================================================`);
-  console.log(`ChitChat Secure Gateway (Server)`);
-  console.log(`Blind Router active on port :${PORT}`);
-  console.log(`Incoming webhooks: http://localhost:${PORT}/api/webhooks/incoming/:username`);
-  console.log(`==================================================\n`);
+
+  console.log('\n==================================================');
+  console.log('ChitChat Secure Gateway (Server)');
+  console.log(`Blind Router active on port ${PORT}`);
+  console.log(
+    `Incoming webhooks: http://localhost:${PORT}/api/webhooks/incoming/:username`
+  );
+  console.log('==================================================\n');
+
 });
