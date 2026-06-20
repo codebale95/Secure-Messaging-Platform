@@ -4,7 +4,6 @@ import TextInput from 'ink-text-input';
 import { io } from 'socket.io-client';
 import chalk from 'chalk';
 import { getWebhookUrl, setWebhookUrl, clearWebhookUrl } from './config.js';
-import { getOrGenerateKeyPair, computeSharedSecret, encryptMessage, decryptMessage } from './encryption.js';
 
 export default function App({ username }) {
   const { exit } = useApp();
@@ -14,8 +13,6 @@ export default function App({ username }) {
   const [activeWebhook, setActiveWebhook] = useState(getWebhookUrl() || 'Not Configured');
   const [socket, setSocket] = useState(null);
   const [lastRecipient, setLastRecipient] = useState(null);
-  const [keys] = useState(() => getOrGenerateKeyPair(username));
-  const sentMessagesRef = useRef(new Map());
 
   // Helper to add system and diagnostic log messages to screen (emoji-free, professional logs)
   const addSystemMessage = (text, type = 'info') => {
@@ -75,7 +72,7 @@ export default function App({ username }) {
     newSocket.on('connect', () => {
       setIsConnected(true);
       addSystemMessage('Link established. Authenticating session...', 'success');
-      newSocket.emit('register', { username, publicKey: keys.publicKey });
+      newSocket.emit('register', username);
     });
 
     newSocket.on('disconnect', () => {
@@ -92,22 +89,13 @@ export default function App({ username }) {
     });
 
     newSocket.on('message-received', (msg) => {
-      let displayText = msg.content;
-      try {
-        const parsed = JSON.parse(msg.content);
-        if (parsed.ciphertext && parsed.senderPublicKey) {
-           const sharedSecret = computeSharedSecret(keys.privateKey, parsed.senderPublicKey);
-           displayText = decryptMessage(parsed.ciphertext, sharedSecret);
-        }
-      } catch(e) {}
-
       setMessages((prev) => [
         ...prev,
         {
           id: Math.random().toString(),
           type: 'chat',
           sender: msg.sender,
-          text: displayText,
+          text: msg.content,
           timestamp: new Date(msg.timestamp).toLocaleTimeString()
         }
       ].slice(-16));
@@ -118,21 +106,13 @@ export default function App({ username }) {
     });
 
     newSocket.on('message-sent', (msg) => {
-      let displayText = msg.content;
-      try {
-         const parsed = JSON.parse(msg.content);
-         if (parsed.ciphertext && sentMessagesRef.current.has(parsed.ciphertext)) {
-            displayText = sentMessagesRef.current.get(parsed.ciphertext);
-         }
-      } catch(e) {}
-
       setMessages((prev) => [
         ...prev,
         {
           id: Math.random().toString(),
           type: 'sent',
           recipient: msg.recipient,
-          text: displayText,
+          text: msg.content,
           timestamp: new Date(msg.timestamp).toLocaleTimeString()
         }
       ].slice(-16));
@@ -215,34 +195,6 @@ export default function App({ username }) {
     }
 
     // Handle Direct Messaging
-    const sendDirectMessage = (recipient, text) => {
-      if (!socket || !isConnected) {
-        addSystemMessage('Message delivery failed: Offline.', 'error');
-        return;
-      }
-      
-      socket.emit('get-public-key', recipient, (recipientPubKey) => {
-        if (!recipientPubKey) {
-           addSystemMessage(`User @${recipient} is offline or not found. Cannot exchange E2EE keys.`, 'error');
-           return;
-        }
-        
-        try {
-           const sharedSecret = computeSharedSecret(keys.privateKey, recipientPubKey);
-           const ciphertext = encryptMessage(text, sharedSecret);
-           const payloadStr = JSON.stringify({ ciphertext, senderPublicKey: keys.publicKey });
-           
-           // Store the plaintext locally so we can render it when the server echoes message-sent
-           sentMessagesRef.current.set(ciphertext, text);
-           
-           socket.emit('direct-message', { recipient, content: payloadStr });
-           setLastRecipient(recipient);
-        } catch (err) {
-           addSystemMessage(`Encryption failed: ${err.message}`, 'error');
-        }
-      });
-    };
-
     if (trimmed.startsWith('@')) {
       const spaceIdx = trimmed.indexOf(' ');
       if (spaceIdx === -1) {
@@ -252,11 +204,20 @@ export default function App({ username }) {
       const recipient = trimmed.slice(1, spaceIdx);
       const content = trimmed.slice(spaceIdx + 1);
 
-      sendDirectMessage(recipient, content);
+      if (socket && isConnected) {
+        socket.emit('direct-message', { recipient, content });
+        setLastRecipient(recipient);
+      } else {
+        addSystemMessage('Message delivery failed: Offline.', 'error');
+      }
     } else {
       if (lastRecipient) {
-        addSystemMessage(`Routing to default recipient @${lastRecipient}...`, 'info');
-        sendDirectMessage(lastRecipient, trimmed);
+        if (socket && isConnected) {
+          socket.emit('direct-message', { recipient: lastRecipient, content: trimmed });
+          addSystemMessage(`Routing to default recipient @${lastRecipient}...`, 'info');
+        } else {
+          addSystemMessage('Message delivery failed: Offline.', 'error');
+        }
       } else {
         addSystemMessage('Recipient tag missing. Use @user <message>', 'warning');
       }

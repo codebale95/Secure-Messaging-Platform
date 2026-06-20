@@ -2,7 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const supabase = require('./db');
+const pool = require('./db');
 
 const app = express();
 app.use(cors());
@@ -19,9 +19,6 @@ const io = new Server(server, {
 
 // Active users
 const activeUsers = new Map();
-
-// Public Keys for ECDH
-const publicKeys = new Map();
 
 // Offline webhook storage (still in memory)
 const offlineWebhooks = new Map();
@@ -81,10 +78,7 @@ io.on('connection', (socket) => {
   // =============================
   // REGISTER USER
   // =============================
-  socket.on('register', async (payload) => {
-    
-    const username = typeof payload === 'string' ? payload : payload.username;
-    const publicKey = payload.publicKey;
+  socket.on('register', async (username) => {
 
     if (!username || typeof username !== 'string') {
       socket.emit('sys-alert', {
@@ -92,10 +86,6 @@ io.on('connection', (socket) => {
         message: 'Invalid username'
       });
       return;
-    }
-
-    if (publicKey) {
-      publicKeys.set(username, publicKey);
     }
 
     const existingSocket = activeUsers.get(username);
@@ -130,16 +120,18 @@ io.on('connection', (socket) => {
     // =============================
     try {
 
-      const { data: messages, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('recipient', username)
-        .eq('delivered', false)
-        .order('created_at', { ascending: true });
+      const result = await pool.query(
+        `
+        SELECT *
+        FROM messages
+        WHERE recipient = $1
+        AND delivered = FALSE
+        ORDER BY created_at ASC
+        `,
+        [username]
+      );
 
-      if (error) throw error;
-
-      for (const msg of messages || []) {
+      for (const msg of result.rows) {
 
         socket.emit('message-received', {
           sender: msg.sender,
@@ -147,17 +139,21 @@ io.on('connection', (socket) => {
           timestamp: msg.created_at
         });
 
-        await supabase
-          .from('messages')
-          .update({ delivered: true })
-          .eq('id', msg.id);
+        await pool.query(
+          `
+          UPDATE messages
+          SET delivered = TRUE
+          WHERE id = $1
+          `,
+          [msg.id]
+        );
       }
 
-      if (messages && messages.length > 0) {
+      if (result.rows.length > 0) {
 
         socket.emit('sys-alert', {
           type: 'info',
-          message: `${messages.length} offline message(s) delivered.`
+          message: `${result.rows.length} offline message(s) delivered.`
         });
 
       }
@@ -189,12 +185,6 @@ io.on('connection', (socket) => {
 
   });
 
-  // =============================
-  // PUBLIC KEY EXCHANGE
-  // =============================
-  socket.on('get-public-key', (targetUser, callback) => {
-    callback(publicKeys.get(targetUser) || null);
-  });
 
   // =============================
   // DIRECT MESSAGE
@@ -230,35 +220,43 @@ io.on('connection', (socket) => {
     });
 
     // =============================
-    // CHECK IF ONLINE
+    // USER ONLINE
     // =============================
-    const isOnline = recipientSocket && recipientSocket.connected;
+    if (
+      recipientSocket &&
+      recipientSocket.connected
+    ) {
 
-    if (isOnline) {
-      recipientSocket.emit('message-received', messagePayload);
+      recipientSocket.emit(
+        'message-received',
+        messagePayload
+      );
+
+      return;
     }
 
     // =============================
-    // SAVE EVERY MESSAGE TO DB
+    // USER OFFLINE -> SAVE TO DB
     // =============================
     try {
 
-      const { error } = await supabase
-        .from('messages')
-        .insert({
-          sender: registeredUsername,
-          recipient: recipient,
-          content: content,
-          delivered: isOnline
-        });
-      if (error) throw error;
+      await pool.query(
+        `
+        INSERT INTO messages
+        (sender, recipient, content, delivered)
+        VALUES ($1, $2, $3, FALSE)
+        `,
+        [
+          registeredUsername,
+          recipient,
+          content
+        ]
+      );
 
-      if (!isOnline) {
-        socket.emit('sys-alert', {
-          type: 'warning',
-          message: `Recipient '${recipient}' is offline. Message stored in database.`
-        });
-      }
+      socket.emit('sys-alert', {
+        type: 'warning',
+        message: `Recipient '${recipient}' is offline. Message stored in database.`
+      });
 
     } catch (err) {
 
@@ -284,7 +282,6 @@ io.on('connection', (socket) => {
       activeUsers.delete(
         registeredUsername
       );
-      // Keep public key in memory so offline users can still receive E2EE messages!
 
       socket.broadcast.emit('sys-event', {
         type: 'info',
