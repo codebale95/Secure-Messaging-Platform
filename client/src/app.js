@@ -5,16 +5,26 @@ import { io } from 'socket.io-client';
 import chalk from 'chalk';
 import { getWebhookUrl, setWebhookUrl, clearWebhookUrl } from './config.js';
 import { getOrGenerateKeyPair, computeSharedSecret, encryptMessage, decryptMessage } from './encryption.js';
+import { supabase } from './supabase.js';
 
-export default function App({ username }) {
+export default function App() {
   const { exit } = useApp();
+  const [screen, setScreen] = useState('auth');
+  const [session, setSession] = useState(null);
+  const [username, setUsername] = useState('');
   const [inputVal, setInputVal] = useState('');
   const [messages, setMessages] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
   const [activeWebhook, setActiveWebhook] = useState(getWebhookUrl() || 'Not Configured');
   const [socket, setSocket] = useState(null);
   const [lastRecipient, setLastRecipient] = useState(null);
-  const [keys] = useState(() => getOrGenerateKeyPair(username));
+  const [keys, setKeys] = useState(null);
+
+  useEffect(() => {
+    if (username) {
+      setKeys(getOrGenerateKeyPair(username));
+    }
+  }, [username]);
   const sentMessagesRef = useRef(new Map());
 
   // Helper to add system and diagnostic log messages to screen (emoji-free, professional logs)
@@ -68,14 +78,18 @@ export default function App({ username }) {
 
   // Initialize Socket.io Connection
   useEffect(() => {
+    if (screen !== 'chat' || !session || !keys) return;
+
     addSystemMessage('Establishing connection to router...', 'info');
-    const newSocket = io('http://localhost:3000');
+    const newSocket = io('http://localhost:3000', {
+      auth: { token: session.access_token }
+    });
     setSocket(newSocket);
 
     newSocket.on('connect', () => {
       setIsConnected(true);
       addSystemMessage('Link established. Authenticating session...', 'success');
-      newSocket.emit('register', { username, publicKey: keys.publicKey });
+      newSocket.emit('register', { publicKey: keys.publicKey });
     });
 
     newSocket.on('disconnect', () => {
@@ -156,7 +170,7 @@ export default function App({ username }) {
     return () => {
       newSocket.close();
     };
-  }, [username]);
+  }, [screen, session, keys]);
 
   // Handle Ctrl+C and exit inputs
   useInput((input, key) => {
@@ -178,6 +192,41 @@ export default function App({ username }) {
 
       if (command === '/exit') {
         exit();
+        return;
+      }
+
+      if (screen === 'auth') {
+        if (command === '/signup' && parts.length === 4) {
+          const [_, email, password, desiredUsername] = parts;
+          supabase.auth.signUp({ email, password, options: { data: { username: desiredUsername } } })
+            .then(({ data, error }) => {
+              if (error) addSystemMessage(`Signup failed: ${error.message}`, 'error');
+              else if (data.session) {
+                setSession(data.session);
+                setUsername(data.user.user_metadata.username);
+                setScreen('chat');
+              } else {
+                addSystemMessage('Check your email for a confirmation link, or try logging in if auto-confirm is enabled.', 'success');
+              }
+            });
+          return;
+        }
+
+        if (command === '/login' && parts.length === 3) {
+          const [_, email, password] = parts;
+          supabase.auth.signInWithPassword({ email, password })
+            .then(({ data, error }) => {
+              if (error) addSystemMessage(`Login failed: ${error.message}`, 'error');
+              else {
+                setSession(data.session);
+                setUsername(data.user.user_metadata.username);
+                setScreen('chat');
+              }
+            });
+          return;
+        }
+
+        addSystemMessage('Available commands: /login <email> <password> OR /signup <email> <password> <username>', 'error');
         return;
       }
 
@@ -322,6 +371,30 @@ export default function App({ username }) {
 
     return null;
   };
+
+  if (screen === 'auth') {
+    return React.createElement(
+      Box,
+      { flexDirection: 'column', width: 100, height: 30, padding: 0, justifyContent: 'center', alignItems: 'center' },
+      React.createElement(Text, { color: 'cyan', bold: true, marginY: 1 }, 'CHITCHAT | SECURE TERMINAL VAULT'),
+      React.createElement(Text, { color: 'blue' }, '─'.repeat(50)),
+      React.createElement(Text, { color: 'magenta', bold: true, marginY: 1 }, 'AUTHENTICATION REQUIRED'),
+      React.createElement(Text, { color: 'gray' }, 'To create an account: /signup <email> <password> <username>'),
+      React.createElement(Text, { color: 'gray' }, 'To log in:          /login <email> <password>'),
+      React.createElement(Text, { color: 'gray' }, 'To exit:            /exit'),
+      React.createElement(
+        Box,
+        { flexDirection: 'column', flexGrow: 1, justifyContent: 'flex-end', width: 80 },
+        messages.slice(-5).map(renderMessage)
+      ),
+      React.createElement(
+        Box,
+        { width: 100, borderStyle: 'single', borderColor: 'blue', paddingX: 1, marginY: 0 },
+        React.createElement(Text, { color: 'cyan', bold: true }, `Auth > `),
+        React.createElement(TextInput, { value: inputVal, onChange: setInputVal, onSubmit: handleSubmit, placeholder: "Enter command..." })
+      )
+    );
+  }
 
   // New larger, 100-character unbordered outer layout to perfectly prevent border overlapping glitches
   return React.createElement(

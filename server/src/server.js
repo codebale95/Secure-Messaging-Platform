@@ -72,6 +72,24 @@ app.post('/api/webhooks/incoming/:username', (req, res) => {
 
 
 // =============================
+// SOCKET.IO MIDDLEWARE
+// =============================
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth?.token;
+  if (!token) {
+    return next(new Error("Authentication error: Missing token"));
+  }
+
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data.user) {
+    return next(new Error("Authentication error: Invalid token"));
+  }
+
+  socket.user = data.user;
+  next();
+});
+
+// =============================
 // SOCKET.IO
 // =============================
 io.on('connection', (socket) => {
@@ -83,13 +101,14 @@ io.on('connection', (socket) => {
   // =============================
   socket.on('register', async (payload) => {
     
-    const username = typeof payload === 'string' ? payload : payload.username;
+    // We get the authenticated username from the JWT session
+    const username = socket.user?.user_metadata?.username;
     const publicKey = payload.publicKey;
 
     if (!username || typeof username !== 'string') {
       socket.emit('sys-alert', {
         type: 'error',
-        message: 'Invalid username'
+        message: 'Invalid username in authenticated session'
       });
       return;
     }

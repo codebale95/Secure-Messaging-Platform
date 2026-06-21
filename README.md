@@ -39,10 +39,11 @@ npm install
 ```
 
 ## Configuration
-Create a `.env` file in the root directory (the same folder as this README) with your Supabase credentials:
+Create a `.env` file in the root directory (the same folder as this README) with your Supabase credentials. A `service_role` key is required for the backend to bypass RLS policies when storing offline messages.
 ```env
 SUPABASE_URL=https://your-project-id.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 ```
 
 ## Running the Application
@@ -57,17 +58,26 @@ npm start
 ```
 
 ### 2. Start the Clients
-In your second terminal, launch the chat client. You must provide a unique username:
+In your second terminal, launch the chat client:
 ```bash
 cd client
-npm start -- --username Alice
+npm start
 ```
 
-Open a third terminal for the recipient:
-```bash
-cd client
-npm start -- --username Bob
+### 3. Authentication
+Upon opening the client, you will be prompted to authenticate before connecting.
+
+To create an account:
+```text
+/signup your_email@example.com your_password123 YourUsername
 ```
+
+To log in to an existing account:
+```text
+/login your_email@example.com your_password123
+```
+
+Open a third terminal for the recipient, launch the client, and log in with their credentials.
 
 ## Usage
 To send an encrypted message, simply tag the user and type your message:

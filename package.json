@@ -10,5 +10,9 @@
   "scripts": {
     "server": "npm --prefix server run dev",
     "client": "npm --prefix client start --"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
   }
 }
